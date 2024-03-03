@@ -38,7 +38,7 @@ endif
 
 all: LOOPDRV.SYS
 
-LOOPDRV.SYS: head.o loopdrv.o
+LOOPDRV.SYS: head.o diskiofix.o loopdrv.o
 	$(LD) -o $@ $^ -nostartfiles -s
 
 loopdrv.o: loopdrv.h

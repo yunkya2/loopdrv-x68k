@@ -103,6 +103,19 @@ static int my_atoi(char *p)
   return res;
 }
 
+static int check_patch(void)
+{
+  if (*(uint32_t *)0xb68e == 0x00e9ba)
+    return 0;
+  // FASTIO.Xが組み込まれるなどでHuman68kのdiskio_read処理が差し替えられている
+  // 場合は再帰呼び出し対応修正が効かなくなるため、デバイスの動作を停止する
+  for (int i = 0; i < g_param.num_drives; i++) {
+    struct lodrive *d = &g_param.drive[i];
+    d->status = -1;
+  }
+  return -1;
+}
+
 //****************************************************************************
 // Device driver interrupt rountine
 //****************************************************************************
@@ -120,6 +133,12 @@ int interrupt(void)
     _dos_print("\r\nLoopback device driver for X680x0 version " GIT_REPO_VERSION "\r\n");
 
     int ver = _dos_vernum();
+    if ((ver & 0xffff) != 0x0302) {
+      _dos_print("Human68kのバージョンがv3.02でないため組み込めません\r\n");
+      err = 0x700d;
+      break;
+    }
+
     int units = 1;
     g_param.loopdrv_ver = LOOPDRV_VERSION;
     g_param.default_readonly = false;
@@ -167,6 +186,11 @@ int interrupt(void)
     }
     _dos_print(":でループバックデバイスが利用可能です\r\n");
 
+    // Human68kのdiskio_read処理にパッチを当てる
+    extern char diskio_read_fix;
+    *(uint16_t *)0xeac2 = 0x4ef9;   // jmp
+    *(uint32_t *)0xeac4 = (uint32_t)&diskio_read_fix;
+
     extern char _end;
     req->addr = &_end;
 
@@ -175,6 +199,11 @@ int interrupt(void)
 
   case 0x01: /* disk check */
   {
+    if (check_patch() < 0) {
+      *(int8_t *)&req->addr = -1;
+      break;
+    }
+
     int res;
     switch (g_param.drive[req->unit].status) {
       case 0:
@@ -202,6 +231,11 @@ int interrupt(void)
   case 0x05: /* drive control & sense */
   {
     DPRINTF("DriveControl %d\r\n", req->attr);
+    if (check_patch() < 0) {
+      req->attr = 0x04;
+      break;
+    }
+
     if (g_param.drive[req->unit].status == 0) {
       req->attr = 0x04;
     } else {

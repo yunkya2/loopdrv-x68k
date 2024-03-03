@@ -36,12 +36,16 @@ ifneq ($(DEBUG),)
 CFLAGS += -DDEBUG
 endif
 
-all: LOOPDRV.SYS
+all: LOOPDRV.SYS losetup.x
 
 LOOPDRV.SYS: head.o diskiofix.o loopdrv.o
 	$(LD) -o $@ $^ -nostartfiles -s
 
+losetup.x: losetup.o
+	$(LD) -o $@ $^ -s
+
 loopdrv.o: loopdrv.h
+losetup.o: loopdrv.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $<

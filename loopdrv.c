@@ -186,10 +186,16 @@ int interrupt(void)
     }
     _dos_print(":でループバックデバイスが利用可能です\r\n");
 
-    // Human68kのdiskio_read処理にパッチを当てる
+    // Human68kのdiskio処理にパッチを当てる
     extern char diskio_read_fix;
     *(uint16_t *)0xeac2 = 0x4ef9;   // jmp
     *(uint32_t *)0xeac4 = (uint32_t)&diskio_read_fix;
+    extern char diskio_flush_fix;
+    *(uint16_t *)0xebd0 = 0x4ef9;   // jmp
+    *(uint32_t *)0xebd2 = (uint32_t)&diskio_flush_fix;
+    extern char diskio_ioread_fix;
+    *(uint16_t *)0xec34 = 0x4ef9;   // jmp
+    *(uint32_t *)0xec36 = (uint32_t)&diskio_ioread_fix;
 
     extern char _end;
     req->addr = &_end;

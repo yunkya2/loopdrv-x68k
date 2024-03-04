@@ -55,5 +55,15 @@ losetup.o: loopdrv.h
 
 clean:
 	-rm -f *.o *.SYS *.elf* *.x
+	-rm -rf build
 
-.PHONY: all clean
+RELFILE := loopdrv-$(GIT_REPO_VERSION)
+
+release: all
+	rm -rf build && mkdir build
+	iconv -f utf-8 -t cp932 README.md | sed 's/$$/\r/' > build/README.txt
+	cp LOOPDRV.SYS build
+	cp losetup.x build
+	(cd build; zip -r ../$(RELFILE).zip *)
+
+.PHONY: all clean release

@@ -3,3 +3,5 @@
 *.elf
 *.sys
 *.SYS
+*.zip
+build/

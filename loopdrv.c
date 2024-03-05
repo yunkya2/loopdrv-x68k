@@ -158,10 +158,10 @@ int interrupt(void)
           else if (units > MAX_DRIVES)
             units = MAX_DRIVES;
           break;
-        }
         case 'r':         // /r .. readonlyモードをデフォルトにする
           g_param.default_readonly = true;
           break;
+        }
       }
       p += strlen(p) + 1;
     }

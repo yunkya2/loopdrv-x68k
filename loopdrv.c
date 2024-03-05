@@ -61,7 +61,7 @@ static int rw_sector(struct dos_req_header *req, int (*func)(int, char *, int))
   }
 
   int sect = d->bpb.sectbytes;
-  int pos = d->offset + (int)req->fcb * (d->interleave + sect);
+  uint32_t pos = d->offset + (uint32_t)req->fcb * (d->interleave + sect);
   uint8_t *buf = req->addr;
 
   r = _dos_seek(d->fd, pos, 0);

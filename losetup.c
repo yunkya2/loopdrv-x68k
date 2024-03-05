@@ -236,7 +236,7 @@ void showstat(int unit, struct loopdrv_param *param)
     } else {
       int size = d->bpb.sects == 0 ? d->bpb.sectslong : d->bpb.sects;
       size = size * d->bpb.sectbytes / 1024;
-      printf("%c: %s %6dkB %s\n",
+      printf("%c: %s %6ukB %s\n",
              'A' + d->drive,
              d->readonly ? "ro" : "rw",
              size,

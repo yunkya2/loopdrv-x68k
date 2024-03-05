@@ -24,8 +24,8 @@ L00eace:
     move.l  %a5@(0x0024),%d2    // I/OバッファのLRU管理の先頭アドレス
 L00ead2:
     movea.l %d2,%a1             // ディスクI/Oバッファ
-    move.l	(%a1),%d2           // 次のI/Oバッファアドレス
-    bmi	    L00eaec             // 最後のバッファだった
+    move.l  (%a1),%d2           // 次のI/Oバッファアドレス
+    bmi     L00eaec             // 最後のバッファだった
     cmp.l   %a1@(0x0004),%d1    // 読もうとしているドライブ+セクタ番号と一致するか
     bne     L00ead2             // 次を検索
     move.l  %a1@(0x0008),%d3    // 前のI/Oバッファアドレス
@@ -96,9 +96,9 @@ L00ebd8:
 L00ebdc:
     movea.l %d0,%a1
     tst.b   %a1@(0x0004)        // ドライブ番号
-    bmi     L00ebf4	            // バッファは未使用
+    bmi     L00ebf4             // バッファは未使用
     move.l  %a1@(0x000c),%d0    // DPB
-    bpl     L00ebf4	            // cleanなら何もしない
+    bpl     L00ebf4             // cleanなら何もしない
     lsl.l   #8,%d0
     cmp.l   %d0,%d2
     bne     L00ebf4             // DPBが異なる
@@ -110,7 +110,7 @@ L00ebf4:
     move.l  (%a1),%d0           // 次のI/Oバッファアドレス
     bpl     L00ebdc
     jsr     %a5@(0x0012)        // メディア排出許可処理を呼ぶ
-    movem.l	%a7@+,%d0-%d2/%a1
+    movem.l %a7@+,%d0-%d2/%a1
     rts
 
 ///

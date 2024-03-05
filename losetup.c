@@ -213,12 +213,12 @@ void help(void)
   printf(
 "losetup version " GIT_REPO_VERSION "\n"
 "使用法:\n"
-" losetup                                        : 設定状態表示\n"
-" losetup -h                                     : ヘルプ表示\n"
-" losetup -D                                     : 全ドライブのアンマウント\n"
-" losetup -d ドライブ名                          : イメージファイルのアンマウント\n"
-" losetup [-r][-w] ドライブ名                    : ドライブの状態変更\n"
-" losetup [-r][-w] ドライブ名 イメージファイル名 : イメージファイルのマウント\n"
+" losetup                                          : 設定状態表示\n"
+" losetup -h                                       : ヘルプ表示\n"
+" losetup -D                                       : 全ドライブのアンマウント\n"
+" losetup -d ドライブ名                            : イメージファイルのアンマウント\n"
+" losetup [-r][-w] ドライブ名                      : ドライブの状態変更\n"
+" losetup [-r][-w] [ドライブ名] イメージファイル名 : イメージファイルのマウント\n"
 "                  (-r 読み込み専用でマウント / -w 読み書き可能でマウント)\n"
   );
   exit(1);
@@ -335,7 +335,15 @@ int main(int argc, char **argv)
             exit(1);
           }
         } else {
-          unit = 0;
+          // ドライブ名指定がなかった場合、ファイル名とみなしてマウントされていないドライブを探す
+          for (unit = 0; unit < param->num_drives; unit++) {
+            if (param->drive[unit].status == 0)
+              break;
+          }
+          if (unit >= param->num_drives) {
+            printf("losetup: マウント可能なドライブがありません\n");
+            exit(1);
+          }
           filename = argv[i];
         }
       } else {

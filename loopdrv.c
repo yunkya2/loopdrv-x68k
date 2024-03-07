@@ -64,9 +64,18 @@ static int rw_sector(struct dos_req_header *req, int (*func)(int, char *, int))
   uint32_t pos = d->offset + (uint32_t)req->fcb * (d->interleave + sect);
   uint8_t *buf = req->addr;
 
-  r = _dos_seek(d->fd, pos, 0);
-  if (r < 0) {
-    goto error;
+  uint32_t n;
+  n = _dos_seek(d->fd, pos, 0);
+  if (n != pos) {
+    if (!d->over2gb)
+      goto error;       // 移動後の位置が移動先と異なる場合はエラー
+    // 2GB overを許容する場合、2回に分けてシークしてみる
+    n = _dos_seek(d->fd, 0x7fffffff, 0);
+    if (n != 0x7fffffff)
+      goto error;
+    n = _dos_seek(d->fd, pos - 0x7fffffff, 1);
+    if (n != pos)
+      goto error;
   }
 
   if (d->interleave == 0) {

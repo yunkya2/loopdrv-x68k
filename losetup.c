@@ -89,9 +89,17 @@ int openimg(struct lodrive *drive, char *name, int readonly)
   }
   drive->readonly = readonly;
 
-  uint32_t len = _dos_seek(fd, 0, 2);   // ファイルサイズを得る
   uint8_t buf0[1024];
   uint8_t buf1[1024];
+  uint32_t len = _dos_seek(fd, 0, 2);   // ファイルサイズを得る
+
+  if (!drive->over2gb) {
+    if ((int)len < 0)
+      goto toobig;      // 2GBを超えるファイルはデフォルトではエラーにする
+  } else {
+    if (len > 0xffffff00)
+      goto toobig;      // 2GB超えを許可する場合、2GB-256を超えるファイルはエラーにする
+  }
 
   // ディスクのヘッダから判断可能なものを調べる
   if (_dos_seek(fd, 0, 0) < 0)
@@ -206,6 +214,9 @@ int openimg(struct lodrive *drive, char *name, int readonly)
 notfound:
   _dos_close(fd);
   return -2;
+toobig:
+  _dos_close(fd);
+  return -3;
 }
 
 void help(void)
@@ -213,12 +224,12 @@ void help(void)
   printf(
 "losetup version " GIT_REPO_VERSION "\n"
 "使用法:\n"
-" losetup                                          : 設定状態表示\n"
-" losetup -h                                       : ヘルプ表示\n"
-" losetup -D                                       : 全ドライブのアンマウント\n"
-" losetup -d ドライブ名                            : イメージファイルのアンマウント\n"
-" losetup [-r][-w] ドライブ名                      : ドライブの状態変更\n"
-" losetup [-r][-w] [ドライブ名] イメージファイル名 : イメージファイルのマウント\n"
+" losetup                                              : 設定状態表示\n"
+" losetup -h                                           : ヘルプ表示\n"
+" losetup -D                                           : 全ドライブのアンマウント\n"
+" losetup -d ドライブ名                                : イメージファイルのアンマウント\n"
+" losetup [-r][-w] ドライブ名                          : ドライブの状態変更\n"
+" losetup [-r][-w][-f] [ドライブ名] イメージファイル名 : イメージファイルのマウント\n"
 "                  (-r 読み込み専用でマウント / -w 読み書き可能でマウント)\n"
   );
   exit(1);
@@ -305,6 +316,7 @@ int main(int argc, char **argv)
   int changerw = false;
   int detach = false;
   int detachall = false;
+  int over2gb = false;
   char *filename = NULL;
 
   for (int i = 1; i < argc; i++) {
@@ -318,6 +330,8 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[i], "-w") == 0) {
       readonly = false;
       changerw = true;
+    } else if (strcmp(argv[i], "-f") == 0) {
+      over2gb = true;
     } else if (argv[i][0] == '-') {
       help();
     } else {
@@ -385,12 +399,16 @@ int main(int argc, char **argv)
   // ファイル名ありの場合 (マウント処理)
 
   struct lodrive *d = &param->drive[unit];
+  d->over2gb = over2gb;
   int fd = openimg(d, filename, readonly);
   if (fd == -1) {
     printf("losetup: イメージファイル %s が開けません\n", filename);
     exit(1);
   } else if (fd == -2) {
     printf("losetup: イメージファイルのフォーマットが推測できません\n");
+    exit(1);
+  } else if (fd == -3) {
+    printf("losetup: イメージファイルが大きすぎます\n");
     exit(1);
   }
 

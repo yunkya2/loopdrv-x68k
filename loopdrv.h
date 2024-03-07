@@ -37,7 +37,7 @@ struct dos_bpb {
 //****************************************************************************
 
 #define MAX_DRIVES      8
-#define LOOPDRV_VERSION 1
+#define LOOPDRV_VERSION 2
 
 struct lodrive {
   int status;                   // Disk status 
@@ -47,6 +47,7 @@ struct lodrive {
   int readonly;                 // Read only flag
   int offset;                   // Offset from the start of the file
   int interleave;               // Interleave data size (for D88 format)
+  int over2gb;                  // Over 2GB flag
   struct dos_bpb bpb;           // BIOS Parameter Block
   char filename[256];           // File name
 };

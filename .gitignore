@@ -1,7 +1,7 @@
 *.o
 *.x
 *.elf
-*.sys
-*.SYS
 *.zip
-build/
+*.d
+*.map
+README.txt

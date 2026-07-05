@@ -25,6 +25,8 @@ CROSS = m68k-xelf-
 CC = $(CROSS)gcc
 AS = $(CROSS)gcc
 LD = $(CROSS)gcc
+OBJCOPY = $(CROSS)objcopy
+LINK = $(CROSS)ld
 
 GIT_REPO_VERSION=$(shell git describe --tags --always)
 
@@ -41,22 +43,22 @@ ifneq ($(DEBUG),)
 CFLAGS += -DDEBUG
 endif
 
+OBJS = head.o loopdrv.o loopdrv.o diskiopatch.o
+
 all: losetup.x
 
-losetup.x: head.o tsr.o losetup.o diskiopatch.o
+losetup.x: head.o tsrhead.o losetup.o diskiopatch.o
 	$(LD) $(LDFLAGS) -o $@ $^ $(LIBS)
-
-OBJS = head.o diskiopatch.o loopdrv.o losetup.o
 
 TSRLIBS = $(shell $(CC) -print-libgcc-file-name)
 TSRLIBS += $(shell $(CC) -print-file-name=libx68kdos.a)
 TSRLIBS += $(shell $(CC) -print-file-name=libx68kiocs.a)
 
-tsr0.o: loopdrv.o
-	$(CROSS)ld -r -o $@ $^ $(TSRLIBS)
+tsr.o: loopdrv.o
+	$(LINK) -r -o $@ $^ $(TSRLIBS)
 
-tsr.o: tsr0.o
-	$(CROSS)objcopy \
+tsrhead.o: tsr.o
+	$(OBJCOPY) \
 		--rename-section .text=.header \
 		--rename-section .data=.header,alloc,readonly,code \
 		--rename-section .bss=.header,alloc,readonly,code \
@@ -71,17 +73,13 @@ tsr.o: tsr0.o
 DEPS = $(OBJS:.o=.d)
 
 clean:
-	-rm -f *.o *.SYS *.elf* *.x *.elf* *.map *.d
-	-rm -rf build
+	-rm -f *.o *.x *.elf *.map *.d
 
 RELFILE := loopdrv-$(GIT_REPO_VERSION)
 
-release: all
-	rm -rf build && mkdir build
-	iconv -f utf-8 -t cp932 README.md | sed 's/$$/\r/' > build/README.txt
-	cp LOOPDRV.SYS build
-	cp losetup.x build
-	(cd build; zip -r ../$(RELFILE).zip *)
+release: clean all
+	./md2txtconv.py README.md
+	zip -r $(RELFILE).zip README.txt losetup.x
 
 -include $(DEPS)
 

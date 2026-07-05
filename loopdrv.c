@@ -1,8 +1,31 @@
+/*
+ * Copyright (c) 2024,2026 Yuichi Nakamura (@yunkya2)
+ *
+ * The MIT License (MIT)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <stdarg.h>
 #include <string.h>
 #include <x68k/dos.h>
 #include "loopdrv.h"
@@ -12,27 +35,15 @@
 //****************************************************************************
 
 struct dos_req_header *reqheader;   // Human68kからのリクエストヘッダ
-
-struct loopdrv_param g_param;
-struct dos_bpb *bpblist[MAX_DRIVES];
-
-struct dos_bpb default_bpb = {
-  1024, 1, 1, 1, 1, 1, 0x01, 1, 0,
-};
-
-int _vernum = 0x302;
+struct loopdrv_param g_param;       // ループバックドライバのパラメータ
 
 //****************************************************************************
 // for debugging
 //****************************************************************************
 
 #ifdef DEBUG
+#include <stdarg.h>
 #include <x68k/iocs.h>
-char heap[1024];                // temporary heap for debug print
-void *_HSTA = heap;
-void *_HEND = heap + 1024;
-void *_PSP;
-
 void DPRINTF(char *fmt, ...)
 {
   char buf[256];
@@ -103,15 +114,6 @@ error:
   return 0x1002;      // Drive not ready
 }
 
-static int my_atoi(char *p)
-{
-  int res = 0;
-  while (*p >= '0' && *p <= '9') {
-    res = res * 10 + *p++ - '0';
-  }
-  return res;
-}
-
 static int check_patch(void)
 {
   if (*(uint32_t *)0xb68e == 0x00e9ba)
@@ -139,76 +141,7 @@ int interrupt(void)
   switch (req->command) {
   case 0x00: /* init */
   {
-    _dos_print("\r\nLoopback device driver for X680x0 version " GIT_REPO_VERSION "\r\n");
-
-    int ver = _dos_vernum();
-    if ((ver & 0xffff) != 0x0302) {
-      _dos_print("Human68kのバージョンがv3.02でないため組み込めません\r\n");
-      err = 0x700d;
-      break;
-    }
-
-    int units = 1;
-    g_param.loopdrv_ver = LOOPDRV_VERSION;
-    g_param.default_readonly = false;
-
-    char *p = (char *)req->status;
-    p += strlen(p) + 1;
-    while (*p != '\0') {
-      if (*p == '/' || *p =='-') {
-        p++;
-        switch (*p | 0x20) {
-        case 'd':         // /d<units> .. ドライブ数設定
-        case 'u':         // /u<units> .. ユニット数設定
-          p++;
-          units = my_atoi(p);
-          if (units < 1)
-            units = 1;
-          else if (units > MAX_DRIVES)
-            units = MAX_DRIVES;
-          break;
-        case 'r':         // /r .. readonlyモードをデフォルトにする
-          g_param.default_readonly = true;
-          break;
-        }
-      }
-      p += strlen(p) + 1;
-    }
-
-    req->attr = units;
-    g_param.num_drives = units;
-    for (int i = 0; i < units; i++) {
-      struct lodrive *d = &g_param.drive[i];
-      d->status = 0;
-      d->fd = -1;
-      d->bpb = default_bpb;
-      bpblist[i] = &d->bpb;
-      d->filename[0] = '\0';
-    }
-    req->status = (uint32_t)&bpblist;
-
-    _dos_print("ドライブ");
-    _dos_putchar('A' + *(uint8_t *)&req->fcb);
-    if (req->attr > 1) {
-      _dos_print(":-");
-      _dos_putchar('A' + *(uint8_t *)&req->fcb + req->attr - 1);
-    }
-    _dos_print(":でループバックデバイスが利用可能です\r\n");
-
-    // Human68kのdiskio処理にパッチを当てる
-    extern char diskio_read_fix;
-    *(uint16_t *)0xeac2 = 0x4ef9;   // jmp
-    *(uint32_t *)0xeac4 = (uint32_t)&diskio_read_fix;
-    extern char diskio_flush_fix;
-    *(uint16_t *)0xebd0 = 0x4ef9;   // jmp
-    *(uint32_t *)0xebd2 = (uint32_t)&diskio_flush_fix;
-    extern char diskio_ioread_fix;
-    *(uint16_t *)0xec34 = 0x4ef9;   // jmp
-    *(uint32_t *)0xec36 = (uint32_t)&diskio_ioread_fix;
-
-    extern char _end;
-    req->addr = &_end;
-
+    err = 0x700d;
     break;
   }
 
@@ -239,7 +172,8 @@ int interrupt(void)
   case 0x02: /* rebuild BPB */
   {
     DPRINTF("Rebuild BPB unit %d\r\n", req->unit);
-    req->status = (uint32_t)&bpblist[req->unit];
+    g_param.drive[req->unit].bpbptr = &g_param.drive[req->unit].bpb;
+    req->status = (uint32_t)&g_param.drive[req->unit].bpbptr;
     break;
   }
 
@@ -298,14 +232,5 @@ int interrupt(void)
     break;
   }
 
-  req->errl = err & 0xff;
-  req->errh = err >> 8;
   return err;
 }
-
-//****************************************************************************
-// Dummy program entry
-//****************************************************************************
-
-void _start(void)
-{}

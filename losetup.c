@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Yuichi Nakamura (@yunkya2)
+ * Copyright (c) 2024,2026 Yuichi Nakamura (@yunkya2)
  *
  * The MIT License (MIT)
  *
@@ -32,8 +32,25 @@
 #include "loopdrv.h"
 
 //****************************************************************************
+// Macros and definitions
+//****************************************************************************
+
+// Human68k work area
+
+#define MEMBLK_TOP    (*(char **)0x1c20)                // 先頭のメモリブロック
+#define CURDIR_TABLE  (*(struct dos_curdir **)0x1c38)   // カレントディレクトリテーブル
+#define MAXFILES      (*(uint16_t *)0x1c6e)             // ファイルディスクリプタ最大値
+#define BUFFERS_SEC   (*(uint16_t *)0x1c70)             // BUFFERSのセクタサイズ(第2引数)
+#define LASTDRIVE     (*(uint8_t *)0x1c73)              // LASTDRIVEの値
+#define CONNDRIVE     (*(uint8_t *)0x1c75)              // 接続ドライブ数-1
+#define DRVXTBL       ((uint8_t *)0x1c7e)               // ドライブ交換テーブル
+
+//****************************************************************************
 // Global variables
 //****************************************************************************
+
+extern struct dos_devheader devheader;  // Human68kのデバイスヘッダ
+extern struct loopdrv_param g_param;    // ループバックドライバのパラメータ
 
 // フロッピーディスク用BPB
 const struct dos_bpb diskbpb[] = {
@@ -53,12 +70,10 @@ const struct dos_bpb diskbpb[] = {
 // Private functions
 //****************************************************************************
 
-//
 // イメージファイル用のファイルディスクリプタを得る
-//
 int getimgfd(void)
 {
-  int maxfd = *(uint16_t *)0x1c6e - 2;  // ファイルディスクリプタ最大値
+  int maxfd = MAXFILES - 2;   // ファイルディスクリプタ最大値
 
   for (int i = maxfd; i >= 5; i--) {
     if (_dos_ioctrlgt(i) == -6) {
@@ -68,9 +83,30 @@ int getimgfd(void)
   return -1;
 }
 
-//
+// 入力パスを絶対パスに正規化して out に格納する
+int getfullpath(const char *name, char *out, size_t outsize)
+{
+  struct dos_nameckbuf ncb;
+  if (_dos_nameck(name, &ncb) < 0) {
+    return -1;
+  }
+
+  int len = snprintf(out, outsize, "%c%c%s%s%s",
+                     ncb.drive[0], ncb.drive[1], ncb.path, ncb.name, ncb.ext);
+  if (len < 0 || (size_t)len >= outsize) {
+    return -1;
+  }
+  return 0;
+}
+
+// 指定したファイルディスクリプタが終了時にクローズされないようにする
+void keepfd(int fd)
+{
+  struct dos_psp *psp = _dos_getpdb();
+  psp->handle[fd / 8] &= ~(1 << (fd % 8));
+}
+
 // イメージファイルをオープンしてBPBを構築する
-//
 int openimg(struct lodrive *drive, char *name, int readonly)
 {
   drive->status = 0;
@@ -219,36 +255,143 @@ toobig:
   return -3;
 }
 
-void help(void)
+// BPBからDPBを構築する
+int bpb2dpb(struct dos_bpb *bpb, struct dos_dpb *dpb)
 {
-  printf(
-"losetup version " GIT_REPO_VERSION "\n"
-"使用法:\n"
-" losetup                                              : 設定状態表示\n"
-" losetup -h                                           : ヘルプ表示\n"
-" losetup -D                                           : 全ドライブのアンマウント\n"
-" losetup -d ドライブ名                                : イメージファイルのアンマウント\n"
-" losetup [-r][-w] ドライブ名                          : ドライブの状態変更\n"
-" losetup [-r][-w][-f] [ドライブ名] イメージファイル名 : イメージファイルのマウント\n"
-"                  (-r 読み込み専用でマウント / -w 読み書き可能でマウント)\n"
-  );
-  exit(1);
+  if (BUFFERS_SEC < bpb->sectbytes) {
+    printf("1セクタあたりのバイト数が大きすぎます\n");
+    return -1;
+  }
+
+  int bytes;
+  int shift;
+
+  dpb->sectbytes = bpb->sectbytes;
+  bytes = bpb->sectbytes - 1;
+  shift = 0;
+  while (bytes > 0) {
+    bytes >>= 1;
+    shift++;
+  }
+  dpb->sbshift = shift;
+
+  dpb->sectclust = bpb->sectclust - 1;
+  bytes = bpb->sectclust - 1;
+  shift = 0;
+  while (bytes > 0) {
+    bytes >>= 1;
+    shift++;
+  }
+  if (bpb->fatnum & 0x80) {
+    shift |= 0x80;  // Intel FATの場合はbit7を立てる
+  }
+  dpb->fatnum = bpb->fatnum & 0x7f;
+  dpb->csshift = shift;
+
+  dpb->fatsect = bpb->resvsects;
+  dpb->fatsects = bpb->fatsects;
+
+  dpb->rootent = bpb->rootent;
+  dpb->rootsect = dpb->fatsects * dpb->fatnum + dpb->fatsect;
+
+  int rootsects = (dpb->rootent * 32 + dpb->sectbytes - 1) / dpb->sectbytes;
+  dpb->datasect = dpb->rootsect + rootsects;
+
+  int sects = bpb->sects ? bpb->sects : bpb->sectslong;
+  dpb->totalclu = ((sects - dpb->datasect) >> dpb->csshift) + 3;
+  if (dpb->totalclu > 0xfff8) {
+    printf("losetup: 総クラスタ数が大きすぎます\n");
+    return -1;
+  }
+
+  dpb->mediabyte = bpb->mediabyte;
+  dpb->fatfindpos = 2;
+
+  dpb->schdir_firstfat = 0;
+  dpb->schfil_firstfat = 0;
+  return 0;
 }
 
-void showstat(int unit, struct loopdrv_param *param)
+//----------------------------------------------------------------------------
+
+// 次のデバイスが next となるデバイスヘッダを探す
+static struct dos_devheader *find_devheader(struct dos_devheader *next)
 {
-  struct lodrive *d = &param->drive[unit];
-  for (int i = 0; i < param->num_drives; i++) {
-    if (i != unit && unit >= 0)
+  // Human68kからNULデバイスドライバを探す
+  char *p = MEMBLK_TOP;   // 先頭のメモリブロック
+  while (memcmp(p, "NUL     ", 8) != 0) {
+    p += 2;
+  }
+
+  // デバイスドライバのリンクをたどって next の前のデバイスヘッダを探す
+  struct dos_devheader *devh = (struct dos_devheader *)(p - 14);
+  while (devh != (struct dos_devheader *)-1) {
+    if (devh->next == next) {
+      return devh;
+    }
+    devh = devh->next;
+  }
+  return NULL;
+}
+
+//----------------------------------------------------------------------------
+
+// 指定したドライブ番号のLOOPDRVパラメータを得る
+struct loopdrv_param *getloparam(int drive, int *unit)
+{
+  // 指定されたドライブ番号のDPBを得る
+  struct dos_dpbptr dpbptr;
+  if (_dos_getdpb(drive + 1, &dpbptr) < 0)
+    return NULL;
+
+  if (unit)
+    *unit = dpbptr.unit;
+
+  // DPBのドライバがLOOPDRVかどうかを確認する
+  struct dos_devheader *devheader = (struct dos_devheader *)dpbptr.driver;
+  if (memcmp(devheader->name, CONFIG_DEVNAME, 8) != 0)
+    return NULL;
+
+  // LOOPDRVのパラメータを得る
+  struct loopdrv_param *param = (struct loopdrv_param *)devheader->param;
+  if (param->loopdrv_ver != LOOPDRV_VERSION) {
+    return NULL;    // LOOPDRVのバージョンが違う
+  }
+
+  return param;
+}
+
+// 指定したドライブ番号のLOOPDRVドライブを得る
+struct lodrive *getlodrive(int drive)
+{
+  int unit;
+
+  struct loopdrv_param *param = getloparam(drive, &unit);
+  if (param == NULL)
+    return NULL;
+
+  return &param->drive[unit];
+}
+
+//----------------------------------------------------------------------------
+
+// 指定したドライブ番号のLOOPDRVドライブの状態を表示する
+void showstat(int drive)
+{
+  for (int i = 0; i < 26; i++) {
+    if (drive >= 0 && drive != i)
       continue;
-    struct lodrive *d = &param->drive[i];
+    struct lodrive *d = getlodrive(i);
+    if (d == NULL)
+      continue;
+
     if (d->status == 0) {
-      printf("%c: --\n", 'A' + d->drive);
+      printf("%c: --\n", 'A' + i);
     } else {
       int size = d->bpb.sects == 0 ? d->bpb.sectslong : d->bpb.sects;
       size = size * d->bpb.sectbytes / 1024;
       printf("%c: %s %6ukB %s\n",
-             'A' + d->drive,
+             'A' + i,
              d->readonly ? "ro" : "rw",
              size,
              d->filename);
@@ -256,21 +399,179 @@ void showstat(int unit, struct loopdrv_param *param)
   }
 }
 
-int detachdrive(int unit, struct loopdrv_param *param)
+// ループバックドライブをアンマウントする
+int umountdrive(int drive, bool ignore_err)
 {
-  struct lodrive *d = &param->drive[unit];
+  struct lodrive *d = getlodrive(drive);
+  if (d == NULL) {
+    if (ignore_err) {
+      return 0;
+    } else {
+      printf("ドライブ %c: はループバックドライブではありません\n", 'A' + drive);
+      return -1;
+    }
+  }
+
   if (d->status != 0) {
-    int r = _dos_drvctrl(1, d->drive + 1);  // 排出
+    int r = _dos_drvctrl(1, drive + 1);  // 排出
     if (r < 0) {
-      printf("losetup: %d ドライブ%c:のアンマウントに失敗しました\n", r, 'A' + d->drive);
+      printf("ドライブ %c: をアンマウントできません\n", 'A' + drive);
       return -1;
     }
     _dos_close(d->fd);
     d->status = 0;
     d->fd = -1;
     d->filename[0] = '\0';
+    return 1;
   }
+
   return 0;
+}
+
+// ループバックドライブの読み書き状態を変更する
+int changerwdrive(struct lodrive *d, int readonly)
+{
+  // 未マウント時はフラグ変更のみ行う
+  if (d->status == 0) {
+    d->readonly = readonly;
+    return 0;
+  }
+
+  // 読み込み専用への変更はフラグ変更のみ
+  if (readonly) {
+    d->readonly = true;
+    return 0;
+  }
+
+  // 読み書き可能への変更の場合はファイルオープンのやり直しが必要
+  if (!d->readonly) {
+    return 0;
+  }
+
+  int fd = _dos_open(d->filename, 2);    // RW open
+  if (fd < 0) {
+    return -1;
+  }
+  if (_dos_dup2(fd, d->fd) < 0) {
+    _dos_close(fd);
+    return -1;
+  }
+  _dos_close(fd);
+  d->readonly = false;
+
+  // プロセス終了時にイメージファイルを開いているファイルディスクリプタがクローズされないようにする
+  keepfd(d->fd);
+
+  return 0;
+}
+
+// loopdrvドライブを削除する
+int detachdrive(int drive)
+{
+  struct loopdrv_param *param = getloparam(drive, NULL);
+  if (param == NULL)
+      return -1;
+  for (int i = 0; i < param->num_drives; i++) {
+    if (param->drive[i].status != 0) {
+      return 0;   // 他のドライブがマウントされている場合はLOOPDRVを残す
+    }
+  }
+
+  // デバイスドライバのリンクリストからloopdrvを外す
+  struct dos_devheader *prev = find_devheader(param->devheader);
+  if (prev != NULL) {
+    prev->next = param->devheader->next;
+  }
+
+  // 常駐しているloopdrvのドライブを削除する
+  int first = 1;
+  for (int drv = 0; drv < 26; drv++) {
+    struct dos_curdir *curdir = &CURDIR_TABLE[(int)DRVXTBL[drv]];
+    if (curdir->type != 0x40 || curdir->dpb->devheader != param->devheader) {
+      continue;
+    }
+
+    // Human68kのカレントディレクトリテーブルからloopdrvを外す
+    curdir->type = 0;
+    for (int i = 0; i < 26; i++) {
+      if (CURDIR_TABLE[i].type == 0x40 &&
+          CURDIR_TABLE[i].dpb->next == curdir->dpb) {
+          CURDIR_TABLE[i].dpb->next = curdir->dpb->next;
+      }
+    }
+
+    // 接続ドライブ数を減少
+    CONNDRIVE--;
+  }
+
+  // 常駐部を解放する
+  _dos_mfree((char *)param->devheader - 0xf0);
+
+  return 0;
+}
+
+// loopdrvドライブを追加する
+int attachdrive(int drive, struct dos_dpb *dpb, struct dos_devheader *devheader)
+{
+  int realdrv = DRVXTBL[drive];
+  struct dos_curdir *curdir = &CURDIR_TABLE[realdrv];
+
+  // DPBを初期化
+  dpb->unit = 0;
+  dpb->drive = realdrv;
+  dpb->devheader = devheader;
+  dpb->next = (struct dos_dpb *)-1;
+
+  // Human68kのDPBリストにDPBを繋ぐ
+  struct dos_dpb *prev_dpb = NULL;
+  for (int i = 0; i < realdrv; i++) {
+    if (CURDIR_TABLE[i].type == 0x40) {
+      prev_dpb = CURDIR_TABLE[i].dpb;
+    }
+  }
+  if (prev_dpb != NULL) {
+    dpb->next = prev_dpb->next;
+    prev_dpb->next = dpb;
+  }
+
+  // Human68kのカレントディレクトリテーブルを設定する
+  curdir->drive = 'A' + realdrv;
+  curdir->coron = ':';
+  curdir->path[0] = '\t';
+  curdir->path[1] = '\0';
+  curdir->type = 0x40;
+  curdir->dpb = dpb;
+  curdir->curfat = (int)-1;
+  curdir->pathlen = 2;
+
+  // デバイスドライバのリンクリストにsmbfsを繋ぐ
+  struct dos_devheader *prev = find_devheader((struct dos_devheader *)-1);
+  if (prev != NULL) {
+    prev->next = devheader;
+  }
+
+  // 接続ドライブ数を増加
+  CONNDRIVE++;
+
+  return 0;
+}
+
+//----------------------------------------------------------------------------
+
+void help(void)
+{
+  printf(
+"losetup version " GIT_REPO_VERSION "\n"
+"使用法:\n"
+" losetup                                              : マウント状態表示\n"
+" losetup -h                                           : ヘルプ表示\n"
+" losetup -D                                           : 全ドライブのアンマウント\n"
+" losetup -d ドライブ名                                : イメージファイルのアンマウント\n"
+" losetup [-r][-w] ドライブ名                          : ドライブの状態変更\n"
+" losetup [-r][-w][-f] イメージファイル名 [ドライブ名] : イメージファイルのマウント\n"
+"  (-r 読み込み専用でマウント / -w 読み書き可能でマウント / -f 2GB以上のイメージファイルを許可)\n"
+  );
+  exit(1);
 }
 
 //****************************************************************************
@@ -279,165 +580,247 @@ int detachdrive(int unit, struct loopdrv_param *param)
 
 int main(int argc, char **argv)
 {
-  struct loopdrv_param *param = NULL;
-
-  _dos_super(0);
-
-  // LOOPDRV デバイスを検索してパラメータを得る
-  for (int drive = 1; drive <= 26; drive++) {
-    struct dos_dpbptr dpb;
-    if (_dos_getdpb(drive, &dpb) < 0)
-      continue;
-    char *p = (char *)dpb.driver + 14;
-    if (memcmp(p, "\x01LOOPDRV", 8) == 0) {
-      if (param == NULL)
-        param = *(struct loopdrv_param **)(p + 8);
-      param->drive[dpb.unit].drive = dpb.drive;
-    }
-  }
-  if (param == NULL) {
-    printf("losetup: LOOPDRV.SYSが組み込まれていません\n");
-    return 1;
-  }
-  if (param->loopdrv_ver != LOOPDRV_VERSION) {
-    printf("losetup: LOOPDRV.SYSのバージョンが違います\n");
-    return 1;
-  }
-  if (param->drive[0].status < 0) {
-    printf("losetup: Human68kのdiskio_read処理の差し替えを検出しました\n"
-    "FASTIO.Xなどが常駐している場合は、常駐を解除してください\n");
-    return 1;
-  }
-
   // コマンドライン引数を得る
 
-  int unit = -1;
-  int readonly = param->default_readonly;
+  int readonly = true;
   int changerw = false;
   int detach = false;
   int detachall = false;
   int over2gb = false;
+  int drive = -1;
   char *filename = NULL;
 
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-D") == 0) {
-      detachall = true;
-    } else if (strcmp(argv[i], "-d") == 0) {
-      detach = true;
-    } else if (strcmp(argv[i], "-r") == 0) {
-      readonly = true;
-      changerw = true;
-    } else if (strcmp(argv[i], "-w") == 0) {
-      readonly = false;
-      changerw = true;
-    } else if (strcmp(argv[i], "-f") == 0) {
-      over2gb = true;
-    } else if (argv[i][0] == '-') {
-      help();
+    if (argv[i][0] == '-') {
+      switch (argv[i][1]) {
+      case 'D':
+      case 'U':
+        detachall = true;
+        break;
+      case 'd':
+      case 'u':
+        detach = true;
+        break;
+      case 'r':
+        readonly = true;
+        changerw = true;
+        break;
+      case 'w':
+        readonly = false;
+        changerw = true;
+        break;
+      case 'f':
+        over2gb = true;
+        break;
+      default:
+        help();
+      }
     } else {
-      if (unit < 0) {
-        int drive = toupper(argv[i][0]);
-        if (drive >= 'A' && drive <= 'Z' && argv[i][1] == ':' && argv[i][2] == '\0') {
-          for (int j = 0; j < param->num_drives; j++) {
-            if (param->drive[j].drive == drive - 'A') {
-              unit = j;
-              break;
-            }
-          }
-          if (unit < 0) {
-            printf("losetup: ドライブ%c:はループバックデバイスではありません\n", drive);
-            exit(1);
-          }
-        } else {
-          // ドライブ名指定がなかった場合、ファイル名とみなしてマウントされていないドライブを探す
-          for (unit = 0; unit < param->num_drives; unit++) {
-            if (param->drive[unit].status == 0)
-              break;
-          }
-          if (unit >= param->num_drives) {
-            printf("losetup: マウント可能なドライブがありません\n");
-            exit(1);
-          }
-          filename = argv[i];
-        }
+      int d = toupper(argv[i][0]);
+      if (d >= 'A' && d <= 'Z' && argv[i][1] == ':' && argv[i][2] == '\0') {
+        drive = d - 'A';
       } else {
         filename = argv[i];
       }
     }
   }
 
+  int ver = _dos_vernum();
+  if ((ver & 0xffff) != 0x0302) {
+    _dos_print("Human68kのバージョンがv3.02でないため実行できません\r\n");
+    return 1;
+  }
+
+  _dos_super(0);
+
+  if (*(uint32_t *)0xb68e != 0x00e9ba) {
+    _dos_print("Human68kのdiskio_read処理の差し替えを検出しました\r\n"
+    "FASTIO.Xなどが常駐している場合は、常駐を解除してください\r\n");
+    return 1;
+  }
+
+  struct loopdrv_param *param = &g_param;
+  param->loopdrv_ver = LOOPDRV_VERSION;
+  param->num_drives = 1;
+  param->devheader = &devheader;
+
   // -D または -d オプションの処理
 
-  if (detach && unit < 0)
-    help();
-  if (detachall || detach) {
-    for (int i = 0; i < param->num_drives; i++) {
-      if (detach && i != unit)
-        continue;
-      detachdrive(i, param);
+  if (detachall) {
+    bool any_mounted;
+    bool any_error;
+
+    do {    // アンマウントできるドライブがなくなるまで繰り返す
+      any_mounted = false;
+      any_error = false;
+      for (int i = 25; i >= 0; i--) {
+        int res = umountdrive(i, true);
+        if (res < 0) {
+          any_error = true;
+        } else if (res == 0) {
+          continue;
+        } else {
+          detachdrive(i);
+          any_mounted = true;
+        }
+      }
+    } while (any_mounted);
+
+    if (any_error) {
+      printf("一部のループバックドライブをアンマウントできませんでした\n");
+      exit(1);
+    } else {
+      printf("すべてのループバックドライブをアンマウントしました\n");
+      exit(0);
     }
-    showstat(-1, param);
+  }
+
+  if (detach) {
+    if (drive < 0) {
+      help();
+    }
+    if (umountdrive(drive, false) < 0 || detachdrive(drive) < 0) {
+      exit(1);
+    }
+    printf("ドライブ %c: をアンマウントしました\n", 'A' + drive);
     exit(0);
   }
 
-  // 引数なしの処理 (状態表示)
-
-  if (unit < 0) {
-    showstat(-1, param);
-    exit(0);
-  }
-
-  // ファイル名なしの場合 (指定ドライブの状態表示)
+  // ファイル名なしの場合
 
   if (filename == NULL) {
-    if (changerw)
-      param->drive[unit].readonly = readonly;
-    showstat(unit, param);
+    if (drive < 0) {
+      // ドライブ名指定もない場合はマウント状態を表示する
+      showstat(-1);
+    } else {
+      // ドライブ名指定がある場合
+      int unit;
+      param = getloparam(drive, &unit);
+      if (param == NULL) {
+        printf("ドライブ %c: はループバックドライブではありません\n", 'A' + drive);
+        exit(1);
+      }
+
+      if (changerw) {
+        // ドライブの読み書き状態を変更する
+        struct lodrive *d = &param->drive[unit];
+        if (changerwdrive(d, readonly) < 0) {
+          printf("ドライブ %c: の読み書き状態を変更できません\n", 'A' + drive);
+          exit(1);
+        }
+        printf("ドライブ %c: の読み書き状態を変更しました\n", 'A' + drive);
+      } else {
+        // ドライブの状態を表示する
+        showstat(drive);
+      }
+    }
     exit(0);
   }
 
   // ファイル名ありの場合 (マウント処理)
 
-  struct lodrive *d = &param->drive[unit];
+  struct lodrive *d = &param->drive[0];
   d->over2gb = over2gb;
   int fd = openimg(d, filename, readonly);
   if (fd == -1) {
-    printf("losetup: イメージファイル %s が開けません\n", filename);
+    printf("イメージファイル %s が開けません\n", filename);
     exit(1);
   } else if (fd == -2) {
-    printf("losetup: イメージファイルのフォーマットが推測できません\n");
+    printf("イメージファイルのフォーマットが推測できません\n");
     exit(1);
   } else if (fd == -3) {
-    printf("losetup: イメージファイルが大きすぎます\n");
+    printf("イメージファイルが大きすぎます\n");
     exit(1);
   }
 
-  if (detachdrive(unit, param) < 0) {
+  memset(&d->dpb, 0, sizeof(struct dos_dpb));
+  if (bpb2dpb(&d->bpb, &d->dpb) < 0) {
     _dos_close(fd);
+    printf("イメージファイルのフォーマットが不正です\n");
     exit(1);
   }
 
-  int dupfd = d->fd;
-  if (dupfd < 0) {
-    dupfd = getimgfd();
-    if (dupfd < 0) {
-      _dos_close(fd);
-      printf("losetup: ファイルディスクリプタが不足しています\n");
+  // マウント先のドライブ番号を決定する
+
+  if (drive < 0) {
+    // ドライブ名指定がない場合は空きドライブを探す
+    for (int i = 0; i < 26; i++) {
+      int realdrv = DRVXTBL[i];
+      struct dos_curdir *curdir = &CURDIR_TABLE[realdrv];
+      if (curdir->type == 0 && realdrv <= LASTDRIVE) {
+        drive = i;
+        break;
+      }
+    }
+    if (drive < 0) {
+      printf("割り当て可能なドライブがありません\n");
       exit(1);
     }
-    d->fd = dupfd;
+  } else {
+    // ドライブ名指定がある場合はそのドライブを使う
+    int realdrv = DRVXTBL[drive];
+    struct dos_curdir *curdir = &CURDIR_TABLE[realdrv];
+    if (curdir->type == 0 && realdrv <= LASTDRIVE) {
+      // 指定されたドライブが空きドライブの場合はそのまま使う
+    } else {
+      // 指定されたドライブをアンマウントして再利用する
+      if (umountdrive(drive, false) < 0) {
+        exit(1);
+      }
+
+      int unit;
+      param = getloparam(drive, &unit);
+      struct lodrive *newd = &param->drive[unit];
+      newd->bpb = d->bpb;
+      newd->readonly = d->readonly;
+      newd->offset = d->offset;
+      newd->interleave = d->interleave;
+      newd->over2gb = d->over2gb;
+      d = newd;
+    }
   }
 
+  int dupfd = getimgfd();
+  if (dupfd < 0) {
+    _dos_close(fd);
+    printf("ファイルディスクリプタが不足しています\n");
+    exit(1);
+  }
+  d->fd = dupfd;
+
+  // イメージファイル用ディスクリプタに複製して元のfdを閉じる
   _dos_dup2(fd, dupfd);
   _dos_close(fd);
   d->status = 1;
-  strcpy(d->filename, filename);
+  if (getfullpath(filename, d->filename, sizeof(d->filename)) < 0) {
+    // 正規化できない場合でも、従来どおり指定文字列を保持して動作継続する
+    strncpy(d->filename, filename, sizeof(d->filename) - 1);
+    d->filename[sizeof(d->filename) - 1] = '\0';
+  }
 
   // プロセス終了時にイメージファイルを開いているファイルディスクリプタがクローズされないようにする
+  keepfd(d->fd);
 
-  struct dos_psp *psp = _dos_getpdb();
-  psp->handle[dupfd / 8] &= ~(1 << (dupfd % 8));
+  if (param != &g_param) {
+    exit(0);  // 常駐済みのloopdrvの設定を変更して終了
+  }
 
-  showstat(unit, param);
+  // Human68kのdiskioドライバにリエントラント対応パッチを当てる
+  void apply_iopatch(void);
+  apply_iopatch();
+
+  attachdrive(drive, &d->dpb, &devheader);
+  printf("ドライブ %c: にイメージファイル %s をマウントしました\n", 'A' + drive, filename);
+
+#ifdef DEBUG
+  // ヒープ領域の末尾までを常駐して終了する
+  extern char _HEND;
+  _dos_keeppr((int)&_HEND - (int)&devheader, 0);
+#else
+  // loopdrvの常駐部のみを常駐して終了する
+  extern char _start;
+  _dos_keeppr((int)&_start - (int)&devheader, 0);
+#endif
+
   return 0;
 }

@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024 Yuichi Nakamura (@yunkya2)
+# Copyright (c) 2024,2026 Yuichi Nakamura (@yunkya2)
 #
 # The MIT License (MIT)
 #
@@ -28,24 +28,39 @@ LD = $(CROSS)gcc
 
 GIT_REPO_VERSION=$(shell git describe --tags --always)
 
-CFLAGS = -g -m68000 -I. -Os -DGIT_REPO_VERSION=\"$(GIT_REPO_VERSION)\"
-CFLAGS += -finput-charset=utf-8 -fexec-charset=cp932
-ASFLAGS = -m68000 -I.
+CFLAGS = -Os -g $(INC) $(DEFS) -MMD -MP
+CFLAGS += -DGIT_REPO_VERSION=\"$(GIT_REPO_VERSION)\"
+ASFLAGS = -I. -MMD -MP
+LDFLAGS = -s
+LDFLAGS += -Wl,-Map,$(@:.x=.map) -specs=nano.specs
+
+INC += -I.
+DEFS +=
 
 ifneq ($(DEBUG),)
 CFLAGS += -DDEBUG
 endif
 
-all: LOOPDRV.SYS losetup.x
+all: losetup.x
 
-LOOPDRV.SYS: head.o diskiofix.o loopdrv.o
-	$(LD) -o $@ $^ -nostartfiles -s
+losetup.x: head.o tsr.o losetup.o diskiopatch.o
+	$(LD) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-losetup.x: losetup.o
-	$(LD) -o $@ $^ -s
+OBJS = head.o diskiopatch.o loopdrv.o losetup.o
 
-loopdrv.o: loopdrv.h
-losetup.o: loopdrv.h
+TSRLIBS = $(shell $(CC) -print-libgcc-file-name)
+TSRLIBS += $(shell $(CC) -print-file-name=libx68kdos.a)
+TSRLIBS += $(shell $(CC) -print-file-name=libx68kiocs.a)
+
+tsr0.o: loopdrv.o
+	$(CROSS)ld -r -o $@ $^ $(TSRLIBS)
+
+tsr.o: tsr0.o
+	$(CROSS)objcopy \
+		--rename-section .text=.header \
+		--rename-section .data=.header,alloc,readonly,code \
+		--rename-section .bss=.header,alloc,readonly,code \
+	$< $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $<
@@ -53,8 +68,10 @@ losetup.o: loopdrv.h
 %.o: %.S
 	$(AS) $(ASFLAGS) -c $<
 
+DEPS = $(OBJS:.o=.d)
+
 clean:
-	-rm -f *.o *.SYS *.elf* *.x
+	-rm -f *.o *.SYS *.elf* *.x *.elf* *.map *.d
 	-rm -rf build
 
 RELFILE := loopdrv-$(GIT_REPO_VERSION)
@@ -65,5 +82,7 @@ release: all
 	cp LOOPDRV.SYS build
 	cp losetup.x build
 	(cd build; zip -r ../$(RELFILE).zip *)
+
+-include $(DEPS)
 
 .PHONY: all clean release

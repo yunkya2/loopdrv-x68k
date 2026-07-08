@@ -820,6 +820,7 @@ int main(int argc, char **argv)
   keepfd(d->fd);
 
   if (param != &g_param) {
+    printf("ドライブ %c: にイメージファイル %s をマウントしました\n", 'A' + drive, filename);
     exit(0);  // 常駐済みのloopdrvの設定を変更して終了
   }
 

@@ -193,6 +193,24 @@ int openimg(struct lodrive *drive, char *name, int readonly)
     }
   }
 
+  // IBM SuperFD format MOイメージかどうか
+  if (buf0[0] == 0xeb && buf0[510] == 0x55 && buf0[511] == 0xaa) {
+    // ブートセクタ内のBPBを使う
+    drive->bpb.sectbytes = buf0[0x0b] + (buf0[0x0c] << 8);
+    drive->bpb.sectclust = buf0[0x0d];
+    drive->bpb.resvsects = buf0[0x0e] + (buf0[0x0f] << 8);
+    drive->bpb.fatnum = buf0[0x10] | 0x80;  // Intel FAT
+    drive->bpb.rootent = buf0[0x11] + (buf0[0x12] << 8);
+    drive->bpb.sects = buf0[0x13] + (buf0[0x14] << 8);
+//    drive->bpb.mediabyte = buf0[0x15];
+    drive->bpb.mediabyte = 0xf6;  // MOに固定
+    drive->bpb.fatsects = buf0[0x16] + (buf0[0x17] << 8);
+    drive->bpb.sectslong = buf0[0x20] + (buf0[0x21] << 8) +
+                           (buf0[0x22] << 16) + (buf0[0x23] << 24);
+
+    return fd;
+  }
+
   uint32_t extsize = 0;
 
   // DIM イメージファイルかどうか
